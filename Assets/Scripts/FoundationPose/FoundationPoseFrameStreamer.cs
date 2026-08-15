@@ -55,6 +55,7 @@ namespace FoundationPoseStreaming
             public double deltaMs;
             public int invalidDepthCount;
             public RectInt maskBBox;
+            public double maskTimestamp;
         }
 
         void Reset()
@@ -228,6 +229,7 @@ namespace FoundationPoseStreaming
 
             byte[] mask = null;
             RectInt maskBBox = default;
+            double maskTimestamp = 0.0;
             if (isRegistration)
             {
                 if (maskSource == null)
@@ -236,7 +238,7 @@ namespace FoundationPoseStreaming
                     return null;
                 }
 
-                if (!maskSource.TryBuildMask(finalWidth, finalHeight, rgbTimestamp, out mask, out maskBBox, out double maskTimestamp, out string maskReason))
+                if (!maskSource.TryBuildMask(finalWidth, finalHeight, rgbTimestamp, out mask, out maskBBox, out maskTimestamp, out string maskReason))
                 {
                     LogDrop($"registration_mask_unavailable {maskReason}");
                     return null;
@@ -260,7 +262,8 @@ namespace FoundationPoseStreaming
                 depthTimestamp = depthTimestamp,
                 deltaMs = deltaMs,
                 invalidDepthCount = invalidDepthCount,
-                maskBBox = maskBBox
+                maskBBox = maskBBox,
+                maskTimestamp = maskTimestamp
             };
         }
 
@@ -510,6 +513,16 @@ namespace FoundationPoseStreaming
                     double encodeMs = (DateTime.UtcNow - start).TotalMilliseconds;
                     if (accepted)
                     {
+                        if (sample.isRegistration && sample.maskU8 != null && maskSource != null && maskSource.enableGeometryTrace)
+                        {
+                            Debug.Log(
+                                "[FP-GEO][SEND] " +
+                                $"trace={sample.maskTimestamp:F9} frame_id={frameId} frame_index={frameIndex} " +
+                                $"frame_timestamp={sample.rgbTimestamp:F9} final_size={sample.width}x{sample.height} " +
+                                $"mask_present=1 mask_bbox={sample.maskBBox} " +
+                                $"corners=({sample.maskBBox.xMin},{sample.maskBBox.yMin})-({sample.maskBBox.xMax},{sample.maskBBox.yMax}) " +
+                                $"mask_age_ms={Math.Abs(sample.rgbTimestamp - sample.maskTimestamp) * 1000.0:F2}");
+                        }
                         nextIndex++;
                         Log($"encoded frame_id={frameId} index={frameIndex} register={sample.isRegistration} encode_ms={encodeMs:F2} message_bytes={encoded.message.Length} dropped_tracking_encode={droppedTrackingEncodeCount}");
                     }

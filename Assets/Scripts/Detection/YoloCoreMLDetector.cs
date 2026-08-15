@@ -24,6 +24,9 @@ namespace ARObjectReplacement.Detection
             int imageHeight,
             float confidenceThreshold,
             float iouThreshold,
+            int targetClassId,
+            double sourceTimestamp,
+            bool enableGeometryTrace,
             out DetectionResult result)
         {
             result = default;
@@ -42,10 +45,17 @@ namespace ARObjectReplacement.Detection
                 Screen.height,
                 confidenceThreshold,
                 iouThreshold,
+                targetClassId,
+                sourceTimestamp,
+                enableGeometryTrace ? 1 : 0,
                 out var x,
                 out var y,
                 out var width,
                 out var height,
+                out var rawNormalizedX,
+                out var rawNormalizedY,
+                out var rawNormalizedWidth,
+                out var rawNormalizedHeight,
                 out var classId,
                 out var confidence,
                 out var hasMaskBottomCenter,
@@ -64,14 +74,35 @@ namespace ARObjectReplacement.Detection
             {
                 IsValid = true,
                 PixelRect = new Rect(x, y, width, height),
+                RawCameraNormalizedTopLeft = new Rect(rawNormalizedX, rawNormalizedY, rawNormalizedWidth, rawNormalizedHeight),
                 ClassId = classId,
                 Confidence = confidence,
                 Timestamp = Time.timeAsDouble,
+                SourceTimestamp = sourceTimestamp,
                 HasMaskBottomCenter = hasMaskBottomCenter != 0,
                 MaskBottomCenter = new Vector2(maskBottomCenterX, maskBottomCenterY),
                 HasMaskCenter = hasMaskCenter != 0,
                 MaskCenter = new Vector2(maskCenterX, maskCenterY)
             };
+            if (enableGeometryTrace)
+            {
+                Debug.Log(
+                    "[FP-GEO][CS-DETECT] " +
+                    $"trace={sourceTimestamp:F9} " +
+                    $"bbox_screen_top_left_px={RectToString(result.PixelRect)} " +
+                    $"corners=({result.PixelRect.xMin:F1},{result.PixelRect.yMin:F1})-({result.PixelRect.xMax:F1},{result.PixelRect.yMax:F1}) " +
+                    $"screen={Screen.width}x{Screen.height} " +
+                    $"yolo_input={imageWidth}x{imageHeight} " +
+                    $"raw_camera_norm_top_left={RectToString(result.RawCameraNormalizedTopLeft)} " +
+                    $"class={classId} conf={confidence:F4} " +
+                    "coordinate_space=iOSScreenTopLeftPixels representation=x_y_w_h");
+                Debug.Log(
+                    "[FP-GEO][RAW-BBOX] " +
+                    $"trace={sourceTimestamp:F9} " +
+                    $"raw_norm_top_left={RectToString(result.RawCameraNormalizedTopLeft)} " +
+                    $"corners=({result.RawCameraNormalizedTopLeft.xMin:F6},{result.RawCameraNormalizedTopLeft.yMin:F6})-({result.RawCameraNormalizedTopLeft.xMax:F6},{result.RawCameraNormalizedTopLeft.yMax:F6}) " +
+                    "coordinate_space=RawCameraNormalizedTopLeft representation=x_y_w_h source=CSharpNativeReturn");
+            }
             return true;
 #else
             return false;
@@ -94,10 +125,17 @@ namespace ARObjectReplacement.Detection
             int screenHeight,
             float confidenceThreshold,
             float iouThreshold,
+            int targetClassId,
+            double sourceTimestamp,
+            int enableGeometryTrace,
             out float x,
             out float y,
             out float width,
             out float height,
+            out float rawNormalizedX,
+            out float rawNormalizedY,
+            out float rawNormalizedWidth,
+            out float rawNormalizedHeight,
             out int classId,
             out float confidence,
             out int hasMaskBottomCenter,
@@ -107,5 +145,10 @@ namespace ARObjectReplacement.Detection
             out float maskCenterX,
             out float maskCenterY);
 #endif
+
+        static string RectToString(Rect rect)
+        {
+            return $"({rect.x:F1},{rect.y:F1},{rect.width:F1},{rect.height:F1})";
+        }
     }
 }

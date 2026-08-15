@@ -605,6 +605,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   maxMaskAgeMs: 300
   bboxInflation: 1
+  enableGeometryTrace: 1
 --- !u!4 &1205372723
 Transform:
   m_ObjectHideFlags: 0
@@ -651,7 +652,11 @@ MonoBehaviour:
   yoloInputHeight: 480
   confidenceThreshold: 0.25
   iouThreshold: 0.45
+  restrictToTargetClass: 1
+  targetClassId: 41
   targetFps: 5
+  foundationPoseFinalWidthForDebug: 256
+  foundationPoseFinalHeightForDebug: 192
   drawOverlay: 1
   overlayScale: 3
   boxThickness: 2
@@ -660,6 +665,8 @@ MonoBehaviour:
   statusFontSize: 42
   editorPreviewBox: 1
   verboseLogging: 1
+  enableGeometryTrace: 1
+  geometryTraceIntervalSeconds: 0.5
 --- !u!1 &1583542577
 GameObject:
   m_ObjectHideFlags: 0

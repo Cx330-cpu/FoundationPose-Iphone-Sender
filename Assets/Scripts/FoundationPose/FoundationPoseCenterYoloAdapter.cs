@@ -20,7 +20,11 @@ namespace FoundationPoseStreaming
         public float confidenceThreshold = 0.25f;
         [Range(0.01f, 1.0f)]
         public float iouThreshold = 0.45f;
+        public bool restrictToTargetClass = true;
+        public int targetClassId = 41;
         public float targetFps = 5.0f;
+        public int foundationPoseFinalWidthForDebug = 256;
+        public int foundationPoseFinalHeightForDebug = 192;
 
         [Header("Overlay")]
         public bool drawOverlay = true;
@@ -34,12 +38,16 @@ namespace FoundationPoseStreaming
 
         [Header("Logging")]
         public bool verboseLogging = true;
+        public bool enableGeometryTrace = true;
+        [Range(0.1f, 5.0f)]
+        public float geometryTraceIntervalSeconds = 0.5f;
 
         readonly YoloCoreMLDetector detector = new YoloCoreMLDetector();
         DetectionResult latestDetection;
         bool hasLatestDetection;
         double lastCaptureRealtime;
         double lastLogRealtime;
+        double lastGeometryTraceRealtime;
         Texture2D lineTexture;
         GUIStyle statusStyle;
 
@@ -66,6 +74,7 @@ namespace FoundationPoseStreaming
             }
 
             cameraManager.frameReceived += OnCameraFrameReceived;
+            maskAdapter.enableGeometryTrace = enableGeometryTrace;
         }
 
         void OnDisable()
@@ -109,6 +118,20 @@ namespace FoundationPoseStreaming
         {
             int outputWidth = Mathf.Clamp(yoloInputWidth, 64, cameraImage.width);
             int outputHeight = Mathf.Clamp(yoloInputHeight, 64, cameraImage.height);
+            bool traceThisDetection = ShouldLogGeometryTrace();
+            if (traceThisDetection)
+            {
+                Debug.Log(
+                    "[FP-GEO][AR] " +
+                    $"trace={cameraImage.timestamp:F9} " +
+                    $"raw_camera={cameraImage.width}x{cameraImage.height} " +
+                    $"yolo_input={outputWidth}x{outputHeight} " +
+                    $"screen={Screen.width}x{Screen.height} " +
+                    $"screen_orientation={Screen.orientation} " +
+                    "cpu_image_origin=ARKitNative conversion_input=full_frame " +
+                    "conversion_transform=None output_format=RGBA32 resize=full_frame_to_yolo_input");
+            }
+
             XRCpuImage.ConversionParams conversionParams = new XRCpuImage.ConversionParams
             {
                 inputRect = new RectInt(0, 0, cameraImage.width, cameraImage.height),
@@ -130,6 +153,9 @@ namespace FoundationPoseStreaming
                     outputHeight,
                     confidenceThreshold,
                     iouThreshold,
+                    restrictToTargetClass ? targetClassId : -1,
+                    cameraImage.timestamp,
+                    traceThisDetection,
                     out DetectionResult detection);
 
                 if (!success)
@@ -140,24 +166,37 @@ namespace FoundationPoseStreaming
                     return;
                 }
 
-                RectInt imageRoi = BoundingBoxMapper.ScreenRectToImageRoi(
-                    detection.PixelRect,
-                    new Vector2Int(Mathf.Max(1, Screen.width), Mathf.Max(1, Screen.height)),
-                    new Vector2Int(outputWidth, outputHeight));
-
-                Rect normalizedTopLeft = new Rect(
-                    imageRoi.xMin / (float)outputWidth,
-                    imageRoi.yMin / (float)outputHeight,
-                    imageRoi.width / (float)outputWidth,
-                    imageRoi.height / (float)outputHeight);
+                Rect normalizedTopLeft = detection.RawCameraNormalizedTopLeft;
 
                 latestDetection = detection;
                 hasLatestDetection = true;
+                maskAdapter.enableGeometryTrace = enableGeometryTrace;
+                if (traceThisDetection)
+                {
+                    Debug.Log(
+                        "[FP-GEO][BRIDGE] " +
+                        $"trace={cameraImage.timestamp:F9} " +
+                        $"bbox_norm_top_left={RectToString(normalizedTopLeft)} " +
+                        $"corners=({normalizedTopLeft.xMin:F6},{normalizedTopLeft.yMin:F6})-({normalizedTopLeft.xMax:F6},{normalizedTopLeft.yMax:F6}) " +
+                        "source=RawCameraNormalizedTopLeft " +
+                        $"coordinate_space={FPBBoxCoordinateSpace.NormalizedTopLeft} " +
+                        $"raw_camera={cameraImage.width}x{cameraImage.height} " +
+                        $"yolo_input={outputWidth}x{outputHeight} " +
+                        $"foundationpose_final_debug={foundationPoseFinalWidthForDebug}x{foundationPoseFinalHeightForDebug}");
+                }
                 maskAdapter.SetBoundingBox(normalizedTopLeft, cameraImage.timestamp, FPBBoxCoordinateSpace.NormalizedTopLeft);
 
                 if (verboseLogging)
                 {
-                    Debug.Log($"[FoundationPoseCenterYoloAdapter] center_object class={detection.ClassId} conf={detection.Confidence:F3} screen_bbox={detection.PixelRect} mask_bbox_norm={normalizedTopLeft} ts={cameraImage.timestamp:F6}");
+                    Debug.Log(
+                        "[FoundationPoseCenterYoloAdapter] bbox_trace " +
+                        $"class={detection.ClassId} conf={detection.Confidence:F3} " +
+                        $"raw_camera={cameraImage.width}x{cameraImage.height} yolo_input={outputWidth}x{outputHeight} screen={Screen.width}x{Screen.height} " +
+                        $"detection_result_screen_top_left_px={RectToString(detection.PixelRect)} " +
+                        $"raw_camera_norm_top_left={RectToString(detection.RawCameraNormalizedTopLeft)} " +
+                        $"set_bbox_norm_top_left={RectToString(normalizedTopLeft)} coordinate_space={FPBBoxCoordinateSpace.NormalizedTopLeft} source=RawCameraNormalizedTopLeft " +
+                        $"foundationpose_final_debug={foundationPoseFinalWidthForDebug}x{foundationPoseFinalHeightForDebug} " +
+                        $"ts={cameraImage.timestamp:F6}");
                 }
             }
             catch (System.Exception ex)
@@ -173,6 +212,23 @@ namespace FoundationPoseStreaming
                     rgbaBytes.Dispose();
                 }
             }
+        }
+
+        bool ShouldLogGeometryTrace()
+        {
+            if (!enableGeometryTrace)
+            {
+                return false;
+            }
+
+            double now = Time.realtimeSinceStartupAsDouble;
+            if (now - lastGeometryTraceRealtime < Mathf.Max(0.1f, geometryTraceIntervalSeconds))
+            {
+                return false;
+            }
+
+            lastGeometryTraceRealtime = now;
+            return true;
         }
 
         bool ShouldCaptureNow()
@@ -315,6 +371,11 @@ namespace FoundationPoseStreaming
                 height);
             DrawBox(previewRect, Mathf.Max(1, Mathf.RoundToInt(boxThickness * overlayScale)), new Color(0.15f, 1f, 0.25f, 0.9f));
 #endif
+        }
+
+        static string RectToString(Rect rect)
+        {
+            return $"(x:{rect.x:F4}, y:{rect.y:F4}, w:{rect.width:F4}, h:{rect.height:F4})";
         }
     }
 }

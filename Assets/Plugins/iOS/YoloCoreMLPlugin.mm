@@ -23,6 +23,10 @@ struct ARORYoloCandidate
     bool hasMaskCenter;
     float maskCenterX;
     float maskCenterY;
+    float rawNormalizedX;
+    float rawNormalizedY;
+    float rawNormalizedWidth;
+    float rawNormalizedHeight;
 };
 
 @interface ARORYoloThresholdProvider : NSObject <MLFeatureProvider>
@@ -56,10 +60,150 @@ static VNCoreMLModel *gVisionModel = nil;
 static ARORYoloThresholdProvider *gThresholdProvider = nil;
 static BOOL gLoggedMissingModel = NO;
 static int gYoloDebugLogCount = 0;
+static int gYoloBBoxLogCount = 0;
+
+static NSString *ARORCGOrientationName(CGImagePropertyOrientation orientation)
+{
+    switch (orientation)
+    {
+        case kCGImagePropertyOrientationUp: return @"Up";
+        case kCGImagePropertyOrientationUpMirrored: return @"UpMirrored";
+        case kCGImagePropertyOrientationDown: return @"Down";
+        case kCGImagePropertyOrientationDownMirrored: return @"DownMirrored";
+        case kCGImagePropertyOrientationLeftMirrored: return @"LeftMirrored";
+        case kCGImagePropertyOrientationRight: return @"Right";
+        case kCGImagePropertyOrientationRightMirrored: return @"RightMirrored";
+        case kCGImagePropertyOrientationLeft: return @"Left";
+        default: return @"Unknown";
+    }
+}
+
+static NSString *ARORCropOptionName(VNImageCropAndScaleOption option)
+{
+    switch (option)
+    {
+        case VNImageCropAndScaleOptionCenterCrop: return @"CenterCrop";
+        case VNImageCropAndScaleOptionScaleFit: return @"ScaleFit";
+        case VNImageCropAndScaleOptionScaleFill: return @"ScaleFill";
+        default: return @"Unknown";
+    }
+}
 
 static float ARORClamp(float value, float minValue, float maxValue)
 {
     return fmaxf(minValue, fminf(maxValue, value));
+}
+
+static void ARORVisionBottomLeftBBoxToRawTopLeft(
+    float visionX,
+    float visionY,
+    float visionWidth,
+    float visionHeight,
+    float *rawX,
+    float *rawY,
+    float *rawWidth,
+    float *rawHeight)
+{
+    const float x0 = visionX;
+    const float x1 = visionX + visionWidth;
+    const float y0 = visionY;
+    const float y1 = visionY + visionHeight;
+
+    const float rawX0 = 1.0f - y0;
+    const float rawY0 = 1.0f - x0;
+    const float rawX1 = 1.0f - y0;
+    const float rawY1 = 1.0f - x1;
+    const float rawX2 = 1.0f - y1;
+    const float rawY2 = 1.0f - x0;
+    const float rawX3 = 1.0f - y1;
+    const float rawY3 = 1.0f - x1;
+
+    const float minX = ARORClamp(fminf(fminf(rawX0, rawX1), fminf(rawX2, rawX3)), 0.0f, 1.0f);
+    const float minY = ARORClamp(fminf(fminf(rawY0, rawY1), fminf(rawY2, rawY3)), 0.0f, 1.0f);
+    const float maxX = ARORClamp(fmaxf(fmaxf(rawX0, rawX1), fmaxf(rawX2, rawX3)), 0.0f, 1.0f);
+    const float maxY = ARORClamp(fmaxf(fmaxf(rawY0, rawY1), fmaxf(rawY2, rawY3)), 0.0f, 1.0f);
+
+    *rawX = minX;
+    *rawY = minY;
+    *rawWidth = fmaxf(0.0f, maxX - minX);
+    *rawHeight = fmaxf(0.0f, maxY - minY);
+}
+
+static void ARORVisionTopLeftPixelsToRawTopLeftNormalized(
+    float topLeftX,
+    float topLeftY,
+    float width,
+    float height,
+    int imageWidth,
+    int imageHeight,
+    float *rawX,
+    float *rawY,
+    float *rawWidth,
+    float *rawHeight)
+{
+    const float visionX = topLeftX / fmaxf(1.0f, (float)imageWidth);
+    const float visionTopY = topLeftY / fmaxf(1.0f, (float)imageHeight);
+    const float visionWidth = width / fmaxf(1.0f, (float)imageWidth);
+    const float visionHeight = height / fmaxf(1.0f, (float)imageHeight);
+    const float visionBottomY = 1.0f - visionTopY - visionHeight;
+    ARORVisionBottomLeftBBoxToRawTopLeft(
+        visionX,
+        visionBottomY,
+        visionWidth,
+        visionHeight,
+        rawX,
+        rawY,
+        rawWidth,
+        rawHeight);
+}
+
+static NSString *ARORRawQuadrant(float rawX, float rawY, float rawWidth, float rawHeight)
+{
+    const float centerX = rawX + rawWidth * 0.5f;
+    const float centerY = rawY + rawHeight * 0.5f;
+    if (centerX < 0.5f && centerY < 0.5f) return @"top-left";
+    if (centerX >= 0.5f && centerY < 0.5f) return @"top-right";
+    if (centerX < 0.5f && centerY >= 0.5f) return @"bottom-left";
+    return @"bottom-right";
+}
+
+static void ARORLogOrientationTest(double traceTimestamp)
+{
+    struct TestBox
+    {
+        const char *name;
+        float x;
+        float y;
+        float width;
+        float height;
+    };
+    const TestBox tests[] = {
+        {"vision_top_left", 0.05f, 0.75f, 0.20f, 0.20f},
+        {"vision_top_right", 0.75f, 0.75f, 0.20f, 0.20f},
+        {"vision_bottom_left", 0.05f, 0.05f, 0.20f, 0.20f},
+        {"vision_bottom_right", 0.75f, 0.05f, 0.20f, 0.20f},
+    };
+
+    for (const TestBox &test : tests)
+    {
+        float rawX = 0.0f;
+        float rawY = 0.0f;
+        float rawWidth = 0.0f;
+        float rawHeight = 0.0f;
+        ARORVisionBottomLeftBBoxToRawTopLeft(test.x, test.y, test.width, test.height, &rawX, &rawY, &rawWidth, &rawHeight);
+        NSLog(@"[FP-GEO][ORIENTATION-TEST] trace=%.9f input=%s vision_norm_bottom_left=(%.3f,%.3f,%.3f,%.3f) orientation=Right(6) inverse=raw_x=1-vision_y raw_y=1-vision_x raw_norm_top_left=(%.3f,%.3f,%.3f,%.3f) raw_quadrant=%@",
+            traceTimestamp,
+            test.name,
+            test.x,
+            test.y,
+            test.width,
+            test.height,
+            rawX,
+            rawY,
+            rawWidth,
+            rawHeight,
+            ARORRawQuadrant(rawX, rawY, rawWidth, rawHeight));
+    }
 }
 
 static float ARORSigmoid(float value)
@@ -246,7 +390,12 @@ static CVPixelBufferRef ARORCreatePixelBufferFromRGBA(const uint8_t *rgbaBytes, 
     return pixelBuffer;
 }
 
-static NSArray<VNObservation *> *ARORRunVision(CVPixelBufferRef pixelBuffer, float confidenceThreshold, float iouThreshold)
+static NSArray<VNObservation *> *ARORRunVision(
+    CVPixelBufferRef pixelBuffer,
+    float confidenceThreshold,
+    float iouThreshold,
+    double traceTimestamp,
+    int enableGeometryTrace)
 {
     if (!ARORLoadYoloModel())
     {
@@ -268,7 +417,22 @@ static NSArray<VNObservation *> *ARORRunVision(CVPixelBufferRef pixelBuffer, flo
     }];
     request.imageCropAndScaleOption = VNImageCropAndScaleOptionScaleFill;
 
-    VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCVPixelBuffer:pixelBuffer orientation:kCGImagePropertyOrientationRight options:@{}];
+    const CGImagePropertyOrientation visionOrientation = kCGImagePropertyOrientationRight;
+    if (enableGeometryTrace)
+    {
+        NSLog(@"[FP-GEO][NATIVE-IN] trace=%.9f pixel_buffer=%zux%zu vision_orientation=%@(%d) crop_scale=%@(%ld) input_origin=top_left_bytes input_format=RGBA32 plugin_pixel_format=BGRA threshold_conf=%.4f threshold_iou=%.4f operation=RGBA_to_BGRA_then_Vision",
+            traceTimestamp,
+            CVPixelBufferGetWidth(pixelBuffer),
+            CVPixelBufferGetHeight(pixelBuffer),
+            ARORCGOrientationName(visionOrientation),
+            (int)visionOrientation,
+            ARORCropOptionName(request.imageCropAndScaleOption),
+            (long)request.imageCropAndScaleOption,
+            confidenceThreshold,
+            iouThreshold);
+    }
+
+    VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCVPixelBuffer:pixelBuffer orientation:visionOrientation options:@{}];
     NSError *error = nil;
     BOOL success = [handler performRequests:@[request] error:&error];
     if (!success || error != nil)
@@ -412,6 +576,9 @@ static BOOL ARORParseYoloOutput(
     int screenHeight,
     float confidenceThreshold,
     float iouThreshold,
+    int targetClassId,
+    double traceTimestamp,
+    int enableGeometryTrace,
     ARORYoloCandidate *selected)
 {
     const int predictionCount = 8400;
@@ -444,6 +611,10 @@ static BOOL ARORParseYoloOutput(
         {
             continue;
         }
+        if (targetClassId >= 0 && bestClass != targetClassId)
+        {
+            continue;
+        }
 
         ARORYoloCandidate candidate;
         candidate.x = values[index] * imageWidth / 640.0f;
@@ -459,6 +630,17 @@ static BOOL ARORParseYoloOutput(
         candidate.hasMaskCenter = false;
         candidate.maskCenterX = 0.0f;
         candidate.maskCenterY = 0.0f;
+        ARORVisionTopLeftPixelsToRawTopLeftNormalized(
+            candidate.x - candidate.width * 0.5f,
+            candidate.y - candidate.height * 0.5f,
+            candidate.width,
+            candidate.height,
+            imageWidth,
+            imageHeight,
+            &candidate.rawNormalizedX,
+            &candidate.rawNormalizedY,
+            &candidate.rawNormalizedWidth,
+            &candidate.rawNormalizedHeight);
         for (int coeff = 0; coeff < maskCoefficientCount; coeff++)
         {
             candidate.maskCoefficients[coeff] = values[(4 + classCount + coeff) * predictionCount + index];
@@ -561,6 +743,41 @@ static BOOL ARORParseYoloOutput(
         return NO;
     }
 
+    if (enableGeometryTrace)
+    {
+        const float rawXMin = best.x - best.width * 0.5f;
+        const float rawYMin = best.y - best.height * 0.5f;
+        const float rawXMax = best.x + best.width * 0.5f;
+        const float rawYMax = best.y + best.height * 0.5f;
+        NSLog(@"[FP-GEO][NATIVE-RAW] trace=%.9f bbox_image_top_left_px=(%.1f, %.1f, %.1f, %.1f) corners=(%.1f,%.1f)-(%.1f,%.1f) image=%dx%d class=%d conf=%.4f coordinate_space=YoloInputTopLeftPixels representation=center_x_center_y_w_h source=raw_multiarray_selected_before_screen_scale",
+            traceTimestamp,
+            best.x,
+            best.y,
+            best.width,
+            best.height,
+            rawXMin,
+            rawYMin,
+            rawXMax,
+            rawYMax,
+            imageWidth,
+            imageHeight,
+            best.classId,
+            best.confidence);
+        NSLog(@"[FP-GEO][RAW-BBOX] trace=%.9f raw_norm_top_left=(%.6f, %.6f, %.6f, %.6f) corners=(%.6f,%.6f)-(%.6f,%.6f) class=%d conf=%.4f coordinate_space=RawCameraNormalizedTopLeft representation=x_y_w_h operation=inverse_Right_6_corner_transform source=raw_multiarray_selected raw_quadrant=%@",
+            traceTimestamp,
+            best.rawNormalizedX,
+            best.rawNormalizedY,
+            best.rawNormalizedWidth,
+            best.rawNormalizedHeight,
+            best.rawNormalizedX,
+            best.rawNormalizedY,
+            best.rawNormalizedX + best.rawNormalizedWidth,
+            best.rawNormalizedY + best.rawNormalizedHeight,
+            best.classId,
+            best.confidence,
+            ARORRawQuadrant(best.rawNormalizedX, best.rawNormalizedY, best.rawNormalizedWidth, best.rawNormalizedHeight));
+    }
+
     if (prototypeArray != nil && best.maskCoefficientCount > 0)
     {
         float maskX = 0.0f;
@@ -596,9 +813,14 @@ static void ARORAddCandidateIfValid(
     float confidence,
     int imageWidth,
     int imageHeight,
-    float confidenceThreshold)
+    float confidenceThreshold,
+    int targetClassId)
 {
     if (confidence < confidenceThreshold || width <= 1.0f || height <= 1.0f)
+    {
+        return;
+    }
+    if (targetClassId >= 0 && classId != targetClassId)
     {
         return;
     }
@@ -617,6 +839,17 @@ static void ARORAddCandidateIfValid(
     candidate.hasMaskCenter = false;
     candidate.maskCenterX = 0.0f;
     candidate.maskCenterY = 0.0f;
+    ARORVisionTopLeftPixelsToRawTopLeftNormalized(
+        candidate.x - candidate.width * 0.5f,
+        candidate.y - candidate.height * 0.5f,
+        candidate.width,
+        candidate.height,
+        imageWidth,
+        imageHeight,
+        &candidate.rawNormalizedX,
+        &candidate.rawNormalizedY,
+        &candidate.rawNormalizedWidth,
+        &candidate.rawNormalizedHeight);
     [candidates addObject:[NSValue valueWithBytes:&candidate objCType:@encode(ARORYoloCandidate)]];
 }
 
@@ -627,6 +860,8 @@ static BOOL ARORSelectCenterCandidate(
     int screenWidth,
     int screenHeight,
     float iouThreshold,
+    double traceTimestamp,
+    int enableGeometryTrace,
     ARORYoloCandidate *selected)
 {
     if (candidates.count == 0 || selected == nullptr)
@@ -723,6 +958,41 @@ static BOOL ARORSelectCenterCandidate(
         return NO;
     }
 
+    if (enableGeometryTrace)
+    {
+        const float rawXMin = best.x - best.width * 0.5f;
+        const float rawYMin = best.y - best.height * 0.5f;
+        const float rawXMax = best.x + best.width * 0.5f;
+        const float rawYMax = best.y + best.height * 0.5f;
+        NSLog(@"[FP-GEO][NATIVE-RAW] trace=%.9f bbox_image_top_left_px=(%.1f, %.1f, %.1f, %.1f) corners=(%.1f,%.1f)-(%.1f,%.1f) image=%dx%d class=%d conf=%.4f coordinate_space=YoloInputTopLeftPixels representation=center_x_center_y_w_h source=selected_candidate_before_screen_scale",
+            traceTimestamp,
+            best.x,
+            best.y,
+            best.width,
+            best.height,
+            rawXMin,
+            rawYMin,
+            rawXMax,
+            rawYMax,
+            imageWidth,
+            imageHeight,
+            best.classId,
+            best.confidence);
+        NSLog(@"[FP-GEO][RAW-BBOX] trace=%.9f raw_norm_top_left=(%.6f, %.6f, %.6f, %.6f) corners=(%.6f,%.6f)-(%.6f,%.6f) class=%d conf=%.4f coordinate_space=RawCameraNormalizedTopLeft representation=x_y_w_h operation=inverse_Right_6_corner_transform source=selected_candidate raw_quadrant=%@",
+            traceTimestamp,
+            best.rawNormalizedX,
+            best.rawNormalizedY,
+            best.rawNormalizedWidth,
+            best.rawNormalizedHeight,
+            best.rawNormalizedX,
+            best.rawNormalizedY,
+            best.rawNormalizedX + best.rawNormalizedWidth,
+            best.rawNormalizedY + best.rawNormalizedHeight,
+            best.classId,
+            best.confidence,
+            ARORRawQuadrant(best.rawNormalizedX, best.rawNormalizedY, best.rawNormalizedWidth, best.rawNormalizedHeight));
+    }
+
     best.x = ARORClamp((best.x - best.width * 0.5f) * screenWidth / imageWidth, 0.0f, (float)screenWidth);
     best.y = ARORClamp((best.y - best.height * 0.5f) * screenHeight / imageHeight, 0.0f, (float)screenHeight);
     best.width = ARORClamp(best.width * screenWidth / imageWidth, 1.0f, (float)screenWidth - best.x);
@@ -740,6 +1010,9 @@ static BOOL ARORParseSplitYoloOutput(
     int screenHeight,
     float confidenceThreshold,
     float iouThreshold,
+    int targetClassId,
+    double traceTimestamp,
+    int enableGeometryTrace,
     ARORYoloCandidate *selected)
 {
     const int coordinateCount = 4;
@@ -819,7 +1092,8 @@ static BOOL ARORParseSplitYoloOutput(
             bestConfidence,
             imageWidth,
             imageHeight,
-            confidenceThreshold);
+            confidenceThreshold,
+            targetClassId);
     }
 
     if (gYoloDebugLogCount < 20)
@@ -842,7 +1116,16 @@ static BOOL ARORParseSplitYoloOutput(
         gYoloDebugLogCount++;
     }
 
-    return ARORSelectCenterCandidate(candidates, imageWidth, imageHeight, screenWidth, screenHeight, iouThreshold, selected);
+    return ARORSelectCenterCandidate(
+        candidates,
+        imageWidth,
+        imageHeight,
+        screenWidth,
+        screenHeight,
+        iouThreshold,
+        traceTimestamp,
+        enableGeometryTrace,
+        selected);
 }
 
 static int ARORClassIdForLabel(NSString *label)
@@ -890,6 +1173,9 @@ static BOOL ARORParseRecognizedObjects(
     int screenHeight,
     float confidenceThreshold,
     float iouThreshold,
+    int targetClassId,
+    double traceTimestamp,
+    int enableGeometryTrace,
     ARORYoloCandidate *selected)
 {
     if (recognizedObjects.count == 0)
@@ -907,6 +1193,54 @@ static BOOL ARORParseRecognizedObjects(
         maxConfidenceSeen = fmaxf(maxConfidenceSeen, confidence);
 
         CGRect box = object.boundingBox;
+        int classId = ARORClassIdForLabel(label.identifier);
+        if (enableGeometryTrace &&
+            confidence >= confidenceThreshold &&
+            (targetClassId < 0 || classId == targetClassId))
+        {
+            float rawX = 0.0f;
+            float rawY = 0.0f;
+            float rawWidth = 0.0f;
+            float rawHeight = 0.0f;
+            ARORVisionBottomLeftBBoxToRawTopLeft(
+                box.origin.x,
+                box.origin.y,
+                box.size.width,
+                box.size.height,
+                &rawX,
+                &rawY,
+                &rawWidth,
+                &rawHeight);
+            NSLog(@"[FP-GEO][VISION-BBOX] trace=%.9f vision_norm_bottom_left=(%.6f, %.6f, %.6f, %.6f) corners=(%.6f,%.6f)-(%.6f,%.6f) image=%dx%d label=%@ class=%d conf=%.4f coordinate_space=VisionNormalizedBottomLeft representation=x_y_w_h source=VNRecognizedObjectObservation",
+                traceTimestamp,
+                box.origin.x,
+                box.origin.y,
+                box.size.width,
+                box.size.height,
+                box.origin.x,
+                box.origin.y,
+                box.origin.x + box.size.width,
+                box.origin.y + box.size.height,
+                imageWidth,
+                imageHeight,
+                label.identifier,
+                classId,
+                confidence);
+            NSLog(@"[FP-GEO][RAW-BBOX] trace=%.9f raw_norm_top_left=(%.6f, %.6f, %.6f, %.6f) corners=(%.6f,%.6f)-(%.6f,%.6f) class=%d conf=%.4f coordinate_space=RawCameraNormalizedTopLeft representation=x_y_w_h operation=inverse_Right_6_corner_transform source=VNRecognizedObjectObservation raw_quadrant=%@",
+                traceTimestamp,
+                rawX,
+                rawY,
+                rawWidth,
+                rawHeight,
+                rawX,
+                rawY,
+                rawX + rawWidth,
+                rawY + rawHeight,
+                classId,
+                confidence,
+                ARORRawQuadrant(rawX, rawY, rawWidth, rawHeight));
+        }
+
         float width = box.size.width * imageWidth;
         float height = box.size.height * imageHeight;
         float centerX = (box.origin.x + box.size.width * 0.5f) * imageWidth;
@@ -919,36 +1253,49 @@ static BOOL ARORParseRecognizedObjects(
             centerY,
             width,
             height,
-            ARORClassIdForLabel(label.identifier),
+            classId,
             confidence,
             imageWidth,
             imageHeight,
-            confidenceThreshold);
+            confidenceThreshold,
+            targetClassId);
     }
 
     if (gYoloDebugLogCount < 20)
     {
-        NSLog(@"[M1 YOLO] recognized objects=%lu candidates=%lu max_conf=%.4f threshold=%.3f",
+        NSLog(@"[M1 YOLO] recognized objects=%lu candidates=%lu max_conf=%.4f threshold=%.3f target_class=%d",
             (unsigned long)recognizedObjects.count,
             (unsigned long)candidates.count,
             maxConfidenceSeen,
-            confidenceThreshold);
+            confidenceThreshold,
+            targetClassId);
         if (recognizedObjects.count > 0)
         {
             VNRecognizedObjectObservation *first = recognizedObjects.firstObject;
             VNClassificationObservation *firstLabel = first.labels.firstObject;
-            NSLog(@"[M1 YOLO] first recognized label=%@ conf=%.4f bbox=(%.3f, %.3f, %.3f, %.3f)",
+            NSLog(@"[M1 YOLO] first recognized label=%@ conf=%.4f vision_norm_bottom_left=(%.3f, %.3f, %.3f, %.3f) image=%dx%d orientation=Vision_original",
                 firstLabel.identifier,
                 firstLabel != nil ? firstLabel.confidence : first.confidence,
                 first.boundingBox.origin.x,
                 first.boundingBox.origin.y,
                 first.boundingBox.size.width,
-                first.boundingBox.size.height);
+                first.boundingBox.size.height,
+                imageWidth,
+                imageHeight);
         }
         gYoloDebugLogCount++;
     }
 
-    return ARORSelectCenterCandidate(candidates, imageWidth, imageHeight, screenWidth, screenHeight, iouThreshold, selected);
+    return ARORSelectCenterCandidate(
+        candidates,
+        imageWidth,
+        imageHeight,
+        screenWidth,
+        screenHeight,
+        iouThreshold,
+        traceTimestamp,
+        enableGeometryTrace,
+        selected);
 }
 
 extern "C"
@@ -967,10 +1314,17 @@ extern "C"
         int screenHeight,
         float confidenceThreshold,
         float iouThreshold,
+        int targetClassId,
+        double traceTimestamp,
+        int enableGeometryTrace,
         float *x,
         float *y,
         float *width,
         float *height,
+        float *rawNormalizedX,
+        float *rawNormalizedY,
+        float *rawNormalizedWidth,
+        float *rawNormalizedHeight,
         int *classId,
         float *confidence,
         int *hasMaskBottomCenter,
@@ -991,7 +1345,12 @@ extern "C"
             return false;
         }
 
-        NSArray<VNObservation *> *observations = ARORRunVision(pixelBuffer, confidenceThreshold, iouThreshold);
+        NSArray<VNObservation *> *observations = ARORRunVision(
+            pixelBuffer,
+            confidenceThreshold,
+            iouThreshold,
+            traceTimestamp,
+            enableGeometryTrace);
         CVPixelBufferRelease(pixelBuffer);
         if (observations.count == 0)
         {
@@ -1087,6 +1446,9 @@ extern "C"
                 screenHeight,
                 confidenceThreshold,
                 iouThreshold,
+                targetClassId,
+                traceTimestamp,
+                enableGeometryTrace,
                 &selected);
         }
         else if (coordinatesArray != nil && confidenceArray != nil)
@@ -1100,6 +1462,9 @@ extern "C"
                 screenHeight,
                 confidenceThreshold,
                 iouThreshold,
+                targetClassId,
+                traceTimestamp,
+                enableGeometryTrace,
                 &selected);
         }
         else
@@ -1113,6 +1478,9 @@ extern "C"
                 screenHeight,
                 confidenceThreshold,
                 iouThreshold,
+                targetClassId,
+                traceTimestamp,
+                enableGeometryTrace,
                 &selected);
         }
 
@@ -1129,10 +1497,66 @@ extern "C"
             return false;
         }
 
+        if (gYoloBBoxLogCount < 40)
+        {
+            NSLog(@"[M1 YOLO] native_selected_bbox screen_top_left_px=(%.1f, %.1f, %.1f, %.1f) screen=%dx%d yolo_image=%dx%d class=%d conf=%.4f target_class=%d coordinate_space=iOS_screen_overlay",
+                selected.x,
+                selected.y,
+                selected.width,
+                selected.height,
+                screenWidth,
+                screenHeight,
+                imageWidth,
+                imageHeight,
+                selected.classId,
+                selected.confidence,
+                targetClassId);
+            gYoloBBoxLogCount++;
+        }
+
+        if (enableGeometryTrace)
+        {
+            ARORLogOrientationTest(traceTimestamp);
+            NSLog(@"[FP-GEO][NATIVE-OUT] trace=%.9f bbox_screen_top_left_px=(%.1f, %.1f, %.1f, %.1f) corners=(%.1f,%.1f)-(%.1f,%.1f) screen=%dx%d yolo_image=%dx%d class=%d conf=%.4f target_class=%d coordinate_space=iOSScreenTopLeftPixels representation=x_y_w_h operation=selected_image_top_left_scaled_to_screen",
+                traceTimestamp,
+                selected.x,
+                selected.y,
+                selected.width,
+                selected.height,
+                selected.x,
+                selected.y,
+                selected.x + selected.width,
+                selected.y + selected.height,
+                screenWidth,
+                screenHeight,
+                imageWidth,
+                imageHeight,
+                selected.classId,
+                selected.confidence,
+                targetClassId);
+            NSLog(@"[FP-GEO][RAW-BBOX] trace=%.9f raw_norm_top_left=(%.6f, %.6f, %.6f, %.6f) corners=(%.6f,%.6f)-(%.6f,%.6f) class=%d conf=%.4f coordinate_space=RawCameraNormalizedTopLeft representation=x_y_w_h operation=native_out_canonical_bbox raw_quadrant=%@",
+                traceTimestamp,
+                selected.rawNormalizedX,
+                selected.rawNormalizedY,
+                selected.rawNormalizedWidth,
+                selected.rawNormalizedHeight,
+                selected.rawNormalizedX,
+                selected.rawNormalizedY,
+                selected.rawNormalizedX + selected.rawNormalizedWidth,
+                selected.rawNormalizedY + selected.rawNormalizedHeight,
+                selected.classId,
+                selected.confidence,
+                ARORRawQuadrant(selected.rawNormalizedX, selected.rawNormalizedY, selected.rawNormalizedWidth, selected.rawNormalizedHeight));
+        }
+
         *x = selected.x;
         *y = selected.y;
         *width = selected.width;
         *height = selected.height;
+        *rawNormalizedX = selected.rawNormalizedX;
+        *rawNormalizedY = selected.rawNormalizedY;
+        *rawNormalizedWidth = selected.rawNormalizedWidth;
+        *rawNormalizedHeight = selected.rawNormalizedHeight;
         *classId = selected.classId;
         *confidence = selected.confidence;
         *hasMaskBottomCenter = selected.hasMaskBottomCenter ? 1 : 0;

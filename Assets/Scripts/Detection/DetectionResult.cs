@@ -8,9 +8,11 @@ namespace ARObjectReplacement.Detection
     {
         public bool IsValid;
         public Rect PixelRect;
+        public Rect RawCameraNormalizedTopLeft;
         public int ClassId;
         public float Confidence;
         public double Timestamp;
+        public double SourceTimestamp;
         public bool HasMaskBottomCenter;
         public Vector2 MaskBottomCenter;
         public bool HasMaskCenter;

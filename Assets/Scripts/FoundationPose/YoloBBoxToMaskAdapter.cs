@@ -19,6 +19,9 @@ namespace FoundationPoseStreaming
         [Range(1.0f, 2.0f)]
         public float bboxInflation = 1.0f;
 
+        [Tooltip("Prints FP-GEO bbox and mask geometry traces for iPhone/FoundationPose alignment debugging.")]
+        public bool enableGeometryTrace = true;
+
         readonly object gate = new object();
         bool hasBBox;
         Rect bbox;
@@ -44,6 +47,17 @@ namespace FoundationPoseStreaming
                 bboxTimestamp = timestamp;
                 coordinateSpace = space;
                 hasBBox = true;
+            }
+
+            if (enableGeometryTrace)
+            {
+                Debug.Log(
+                    "[FP-GEO][MASK-SET] " +
+                    $"trace={timestamp:F9} " +
+                    $"bbox={RectToString(newBBox)} " +
+                    $"corners=({newBBox.xMin:F6},{newBBox.yMin:F6})-({newBBox.xMax:F6},{newBBox.yMax:F6}) " +
+                    $"coordinate_space={space} representation=x_y_w_h " +
+                    $"bbox_inflation={bboxInflation:F3} max_age_ms={maxMaskAgeMs:F1}");
             }
         }
 
@@ -111,6 +125,22 @@ namespace FoundationPoseStreaming
                 }
             }
 
+            if (enableGeometryTrace)
+            {
+                RectInt actualBBox = GetActualMaskBounds(mask, width, height);
+                Debug.Log(
+                    "[FP-GEO][MASK-BUILD] " +
+                    $"trace={maskTimestamp:F9} rgb_ts={rgbTimestamp:F9} age_ms={ageMs:F2} " +
+                    $"final_size={width}x{height} input_bbox={RectToString(localBBox)} input_space={localSpace} " +
+                    $"pixel_bbox={pixelBBox} corners=({pixelBBox.xMin},{pixelBBox.yMin})-({pixelBBox.xMax},{pixelBBox.yMax}) " +
+                    $"center=({pixelBBox.x + pixelBBox.width * 0.5f:F1},{pixelBBox.y + pixelBBox.height * 0.5f:F1})");
+                Debug.Log(
+                    "[FP-GEO][MASK-ACTUAL] " +
+                    $"trace={maskTimestamp:F9} final_size={width}x{height} " +
+                    $"actual_bbox={actualBBox} corners=({actualBBox.xMin},{actualBBox.yMin})-({actualBBox.xMax},{actualBBox.yMax}) " +
+                    "mask_value=255 coordinate_space=FoundationPoseFinalTopLeftPixels");
+            }
+
             return true;
         }
 
@@ -172,6 +202,42 @@ namespace FoundationPoseStreaming
             int clampedXMax = Mathf.Clamp(Mathf.Max(xMin, xMax), 0, width);
             int clampedYMax = Mathf.Clamp(Mathf.Max(yMin, yMax), 0, height);
             return new RectInt(clampedXMin, clampedYMin, clampedXMax - clampedXMin, clampedYMax - clampedYMin);
+        }
+
+        static RectInt GetActualMaskBounds(byte[] mask, int width, int height)
+        {
+            int xMin = width;
+            int yMin = height;
+            int xMax = -1;
+            int yMax = -1;
+            for (int y = 0; y < height; ++y)
+            {
+                int rowOffset = y * width;
+                for (int x = 0; x < width; ++x)
+                {
+                    if (mask[rowOffset + x] == 0)
+                    {
+                        continue;
+                    }
+
+                    xMin = Mathf.Min(xMin, x);
+                    yMin = Mathf.Min(yMin, y);
+                    xMax = Mathf.Max(xMax, x + 1);
+                    yMax = Mathf.Max(yMax, y + 1);
+                }
+            }
+
+            if (xMax < xMin || yMax < yMin)
+            {
+                return new RectInt(0, 0, 0, 0);
+            }
+
+            return new RectInt(xMin, yMin, xMax - xMin, yMax - yMin);
+        }
+
+        static string RectToString(Rect rect)
+        {
+            return $"({rect.x:F6},{rect.y:F6},{rect.width:F6},{rect.height:F6})";
         }
     }
 }
