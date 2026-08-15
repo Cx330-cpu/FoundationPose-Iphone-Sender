@@ -1,0 +1,31 @@
+{
+  "specificationVersion": 6,
+  "inputs": [
+    {
+      "name": "image",
+      "type": "imageType {\n  width: 640\n  height: 640\n  colorSpace: RGB\n}\n"
+    },
+    {
+      "name": "iouThreshold",
+      "type": "doubleType {\n}\n"
+    },
+    {
+      "name": "confidenceThreshold",
+      "type": "doubleType {\n}\n"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "confidence",
+      "type": "multiArrayType {\n  dataType: FLOAT32\n  shapeRange {\n    sizeRanges {\n      upperBound: -1\n    }\n    sizeRanges {\n      lowerBound: 80\n      upperBound: 80\n    }\n  }\n}\n"
+    },
+    {
+      "name": "coordinates",
+      "type": "multiArrayType {\n  dataType: FLOAT32\n  shapeRange {\n    sizeRanges {\n      upperBound: -1\n    }\n    sizeRanges {\n      lowerBound: 4\n      upperBound: 4\n    }\n  }\n}\n"
+    }
+  ],
+  "metadata": {
+    "IoU threshold": "0.7",
+    "Confidence threshold": "0.25"
+  }
+}

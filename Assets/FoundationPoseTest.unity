@@ -583,6 +583,7 @@ GameObject:
   - component: {fileID: 1205372723}
   - component: {fileID: 1205372722}
   - component: {fileID: 1205372724}
+  - component: {fileID: 1205372728}
   m_Layer: 0
   m_Name: FoundationPose Mask
   m_TagString: Untagged
@@ -602,7 +603,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 0ba77554f2ea743078eb28f1bdb23a17, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  maxMaskAgeMs: 100000000
+  maxMaskAgeMs: 300
   bboxInflation: 1
 --- !u!4 &1205372723
 Transform:
@@ -626,12 +627,39 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1205372721}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: dd3999db09f2547d6b49c2eac0906e9c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
   maskAdapter: {fileID: 1205372722}
+--- !u!114 &1205372728
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1205372721}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fcbab543b6ec4605a610bc9a9be71b99, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  cameraManager: {fileID: 918190327}
+  maskAdapter: {fileID: 1205372722}
+  yoloInputWidth: 640
+  yoloInputHeight: 480
+  confidenceThreshold: 0.25
+  iouThreshold: 0.45
+  targetFps: 5
+  drawOverlay: 1
+  overlayScale: 3
+  boxThickness: 2
+  crosshairSize: 30
+  crosshairGap: 10
+  statusFontSize: 42
+  editorPreviewBox: 1
+  verboseLogging: 1
 --- !u!1 &1583542577
 GameObject:
   m_ObjectHideFlags: 0

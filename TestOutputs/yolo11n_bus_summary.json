@@ -1,0 +1,72 @@
+{
+  "model": "Models/yolo11n.pt",
+  "source": "TestOutputs/bus.jpg",
+  "image_shape": [
+    1080,
+    810
+  ],
+  "detections": [
+    {
+      "xyxy": [
+        20.52,
+        230.41,
+        806.81,
+        735.31
+      ],
+      "confidence": 0.9402,
+      "class_id": 5,
+      "class_name": "bus"
+    },
+    {
+      "xyxy": [
+        671.04,
+        394.62,
+        809.81,
+        878.61
+      ],
+      "confidence": 0.8885,
+      "class_id": 0,
+      "class_name": "person"
+    },
+    {
+      "xyxy": [
+        47.42,
+        399.67,
+        239.16,
+        904.13
+      ],
+      "confidence": 0.8784,
+      "class_id": 0,
+      "class_name": "person"
+    },
+    {
+      "xyxy": [
+        223.07,
+        408.69,
+        344.51,
+        860.42
+      ],
+      "confidence": 0.8575,
+      "class_id": 0,
+      "class_name": "person"
+    },
+    {
+      "xyxy": [
+        0.02,
+        556.36,
+        69.14,
+        872.4
+      ],
+      "confidence": 0.6251,
+      "class_id": 0,
+      "class_name": "person"
+    }
+  ],
+  "detection_count": 5,
+  "elapsed_ms_total": 77.8,
+  "speed_ms": {
+    "preprocess": 1.47,
+    "inference": 28.08,
+    "postprocess": 0.92
+  }
+}
