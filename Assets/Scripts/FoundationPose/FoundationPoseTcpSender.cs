@@ -1,5 +1,7 @@
 using System;
+using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using UnityEngine;
 
@@ -66,6 +68,10 @@ namespace FoundationPoseStreaming
 
         void Start()
         {
+            Debug.Log($"[FoundationPoseTcpSender] Startup host={host} port={port} connectOnStart={connectOnStart} " +
+                      $"connectTimeoutMs={connectTimeoutMs} sendTimeoutMs={sendTimeoutMs} " +
+                      $"internetReachability={Application.internetReachability} platform={Application.platform}");
+
             if (connectOnStart)
             {
                 StartSender();
@@ -213,7 +219,10 @@ namespace FoundationPoseStreaming
                         client.NoDelay = true;
                         client.SendTimeout = sendTimeoutMs;
 
-                        Log($"Connecting to FoundationPose server host={host} port={port} attempt={connectAttempt}");
+                        LogResolvedAddresses(host);
+                        Debug.Log($"[FoundationPoseTcpSender] Connecting host={host} port={port} attempt={connectAttempt} " +
+                                  $"timeoutMs={connectTimeoutMs} addressFamily={client.Client.AddressFamily} " +
+                                  $"noDelay={client.NoDelay} sendTimeoutMs={client.SendTimeout}");
                         ConnectWithTimeout(client, host, port, connectTimeoutMs);
                         stream = client.GetStream();
                         lastError = null;
@@ -223,7 +232,9 @@ namespace FoundationPoseStreaming
                             state = FPSenderState.WaitingForRegistrationFrame;
                         }
 
-                        Log($"Connected to FoundationPose server host={host} port={port} attempt={connectAttempt} local={client.Client.LocalEndPoint} remote={client.Client.RemoteEndPoint}");
+                        Debug.Log($"[FoundationPoseTcpSender] Connected host={host} port={port} attempt={connectAttempt} " +
+                                  $"connected={client.Connected} local={client.Client.LocalEndPoint} " +
+                                  $"remote={client.Client.RemoteEndPoint} addressFamily={client.Client.AddressFamily}");
                         break;
                     }
                     catch (Exception ex)
@@ -311,7 +322,7 @@ namespace FoundationPoseStreaming
                 {
                     state = FPSenderState.Error;
                 }
-                Debug.LogError($"FoundationPose sender error: {ex}");
+                LogException("Sender loop failed (connection may have been closed while sending)", ex);
             }
             finally
             {
@@ -376,10 +387,76 @@ namespace FoundationPoseStreaming
 
         void LogConnectFailure(int attempt, Exception ex)
         {
-            SocketException socketException = ex as SocketException ?? ex.GetBaseException() as SocketException;
-            string socketErrorCode = socketException == null ? "n/a" : socketException.SocketErrorCode.ToString();
-            string nativeErrorCode = socketException == null ? "n/a" : socketException.NativeErrorCode.ToString();
-            Debug.LogWarning($"[FoundationPoseTcpSender] Connect failed host={host} port={port} attempt={attempt} SocketErrorCode={socketErrorCode} NativeErrorCode={nativeErrorCode} Message={ex.Message}");
+            Debug.LogWarning($"[FoundationPoseTcpSender] Connect failed host={host} port={port} attempt={attempt} " +
+                             $"timeoutMs={connectTimeoutMs} socket={DescribeSocket()}\n{DescribeException(ex)}");
+        }
+
+        void LogException(string context, Exception ex)
+        {
+            Debug.LogError($"[FoundationPoseTcpSender] {context} host={host} port={port} " +
+                           $"state={State} socket={DescribeSocket()}\n{DescribeException(ex)}");
+        }
+
+        string DescribeSocket()
+        {
+            try
+            {
+                if (client == null)
+                {
+                    return "null";
+                }
+
+                Socket socket = client.Client;
+                return $"connected={client.Connected}, local={socket.LocalEndPoint}, remote={socket.RemoteEndPoint}, " +
+                       $"addressFamily={socket.AddressFamily}, socketType={socket.SocketType}, protocol={socket.ProtocolType}";
+            }
+            catch (Exception ex)
+            {
+                return $"unavailable ({ex.GetType().FullName}: {ex.Message})";
+            }
+        }
+
+        static string DescribeException(Exception exception)
+        {
+            StringBuilder details = new StringBuilder();
+            int depth = 0;
+            for (Exception current = exception; current != null; current = current.InnerException)
+            {
+                if (depth > 0)
+                {
+                    details.AppendLine();
+                }
+
+                details.Append($"exception[{depth}] type={current.GetType().FullName} message={current.Message} hResult=0x{current.HResult:X8}");
+                if (current is SocketException socketException)
+                {
+                    details.Append($" errorCode={socketException.ErrorCode} socketErrorCode={socketException.SocketErrorCode} nativeErrorCode={socketException.NativeErrorCode}");
+                }
+
+                if (!string.IsNullOrEmpty(current.StackTrace))
+                {
+                    details.AppendLine();
+                    details.Append(current.StackTrace);
+                }
+
+                depth++;
+            }
+
+            return details.ToString();
+        }
+
+        static void LogResolvedAddresses(string targetHost)
+        {
+            try
+            {
+                IPAddress[] addresses = Dns.GetHostAddresses(targetHost);
+                string resolved = addresses.Length == 0 ? "<none>" : string.Join(", ", Array.ConvertAll(addresses, address => $"{address} ({address.AddressFamily})"));
+                Debug.Log($"[FoundationPoseTcpSender] DNS host={targetHost} addresses={resolved}");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[FoundationPoseTcpSender] DNS resolution failed host={targetHost}\n{DescribeException(ex)}");
+            }
         }
 
         void Log(string message)
