@@ -54,11 +54,22 @@ namespace FoundationPoseStreaming
     {
         public readonly byte[] message;
         public readonly FPFrameHeader header;
+        public readonly double encodeRgbMs;
+        public readonly double encodeDepthMs;
+        public readonly double encodeMaskMs;
+        public int maskPixelCount;
+        public string maskSourceKind;
+        public string maskReason;
+        public bool maskRequested;
+        public int maskBurstRemaining;
 
-        public FPEncodedFrame(byte[] message, FPFrameHeader header)
+        public FPEncodedFrame(byte[] message, FPFrameHeader header, double encodeRgbMs, double encodeDepthMs, double encodeMaskMs)
         {
             this.message = message;
             this.header = header;
+            this.encodeRgbMs = encodeRgbMs;
+            this.encodeDepthMs = encodeDepthMs;
+            this.encodeMaskMs = encodeMaskMs;
         }
     }
 
@@ -82,9 +93,22 @@ namespace FoundationPoseStreaming
         {
             ValidateImageInputs(rgb24, depthMillimeters, maskU8, width, height, index, intrinsics, timestamp);
 
+            DateTime encodeStart = DateTime.UtcNow;
             byte[] rgbBytes = EncodeRgb(rgb24, width, height, rgbCodec, jpegQuality);
+            double encodeRgbMs = (DateTime.UtcNow - encodeStart).TotalMilliseconds;
+
+            encodeStart = DateTime.UtcNow;
             byte[] depthBytes = EncodeDepthPng(depthMillimeters, width, height);
-            byte[] maskBytes = maskU8 == null ? Array.Empty<byte>() : EncodeMaskPng(maskU8, width, height);
+            double encodeDepthMs = (DateTime.UtcNow - encodeStart).TotalMilliseconds;
+
+            byte[] maskBytes = Array.Empty<byte>();
+            double encodeMaskMs = 0.0;
+            if (maskU8 != null)
+            {
+                encodeStart = DateTime.UtcNow;
+                maskBytes = EncodeMaskPng(maskU8, width, height);
+                encodeMaskMs = (DateTime.UtcNow - encodeStart).TotalMilliseconds;
+            }
 
             FPFrameHeader header = new FPFrameHeader
             {
@@ -120,7 +144,7 @@ namespace FoundationPoseStreaming
                 Buffer.BlockCopy(maskBytes, 0, message, offset, maskBytes.Length);
             }
 
-            return new FPEncodedFrame(message, header);
+            return new FPEncodedFrame(message, header, encodeRgbMs, encodeDepthMs, encodeMaskMs);
         }
 
         public static string FrameIdFromTimestamp(double timestampSeconds, int fallbackIndex)

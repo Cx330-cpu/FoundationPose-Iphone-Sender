@@ -8,9 +8,9 @@ namespace FoundationPoseStreaming
         public int width = 256;
         public int height = 192;
         public float fps = 2.0f;
-        public FPRgbCodec rgbCodec = FPRgbCodec.Png;
+        public FPRgbCodec rgbCodec = FPRgbCodec.Jpeg;
         [Range(1, 100)]
-        public int jpegQuality = 95;
+        public int jpegQuality = 85;
 
         int nextIndex;
         double lastSendTime;

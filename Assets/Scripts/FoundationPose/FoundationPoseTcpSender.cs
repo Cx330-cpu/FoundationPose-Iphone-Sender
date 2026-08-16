@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -33,21 +34,40 @@ namespace FoundationPoseStreaming
 
         readonly object gate = new object();
         readonly AutoResetEvent frameAvailable = new AutoResetEvent(false);
+        readonly Dictionary<string, DateTime> sentFrameUtcById = new Dictionary<string, DateTime>();
+        readonly Queue<string> sentFrameIdOrder = new Queue<string>();
 
         Thread workerThread;
+        Thread controlThread;
         TcpClient client;
         NetworkStream stream;
         volatile bool stopRequested;
 
-        byte[] pendingRegistrationMessage;
-        string pendingRegistrationFrameId;
-        byte[] latestTrackingMessage;
-        string latestTrackingFrameId;
+        FPEncodedFrame pendingRegistrationFrame;
+        FPEncodedFrame latestTrackingFrame;
 
         long sentFrameCount;
         long droppedTrackingFrameCount;
         FPSenderState state = FPSenderState.Stopped;
         string lastError;
+        int maskBurstFramesRemaining;
+        string maskBurstReason;
+        string maskBurstRequestFrameId;
+        DateTime lastSendUtc;
+        FPTrackingResult latestTrackingResult;
+        long trackingResultSequence;
+        int lastSentFrameIndex = -1;
+
+        [Serializable]
+        sealed class FPControlMessage
+        {
+            public string magic;
+            public int version;
+            public string type;
+            public string frame_id;
+            public string reason;
+            public int request_frames;
+        }
 
         public FPSenderState State
         {
@@ -65,6 +85,43 @@ namespace FoundationPoseStreaming
         public long SentFrameCount => Interlocked.Read(ref sentFrameCount);
         public long DroppedTrackingFrameCount => Interlocked.Read(ref droppedTrackingFrameCount);
         public string LastError => lastError;
+        public int LastSentFrameIndex => Volatile.Read(ref lastSentFrameIndex);
+
+        public bool TryGetLatestTrackingResult(out FPTrackingResult result)
+        {
+            lock (gate)
+            {
+                result = latestTrackingResult;
+                return result != null;
+            }
+        }
+
+        public bool TryConsumeMaskBurstFrame(out int remainingAfterConsume, out string reason, out string requestFrameId)
+        {
+            lock (gate)
+            {
+                if (maskBurstFramesRemaining <= 0)
+                {
+                    remainingAfterConsume = 0;
+                    reason = null;
+                    requestFrameId = null;
+                    return false;
+                }
+
+                maskBurstFramesRemaining--;
+                remainingAfterConsume = maskBurstFramesRemaining;
+                reason = maskBurstReason;
+                requestFrameId = maskBurstRequestFrameId;
+
+                Debug.Log($"[FoundationPoseTcpSender] MASK_BURST_REMAINING remaining={remainingAfterConsume} reason={reason ?? "unspecified"} request_frame_id={requestFrameId ?? "none"}");
+                if (maskBurstFramesRemaining == 0)
+                {
+                    Debug.Log($"[FoundationPoseTcpSender] MASK_BURST_END reason={reason ?? "unspecified"} request_frame_id={requestFrameId ?? "none"}");
+                }
+
+                return true;
+            }
+        }
 
         void Start()
         {
@@ -131,10 +188,15 @@ namespace FoundationPoseStreaming
                     Debug.LogWarning("[FoundationPoseTcpSender] Sender thread did not stop within 1000 ms; keeping thread reference to prevent duplicate sender threads.");
                 }
 
-                pendingRegistrationMessage = null;
-                pendingRegistrationFrameId = null;
-                latestTrackingMessage = null;
-                latestTrackingFrameId = null;
+                pendingRegistrationFrame = null;
+                latestTrackingFrame = null;
+                maskBurstFramesRemaining = 0;
+                maskBurstReason = null;
+                maskBurstRequestFrameId = null;
+                latestTrackingResult = null;
+                sentFrameUtcById.Clear();
+                sentFrameIdOrder.Clear();
+                Volatile.Write(ref lastSentFrameIndex, -1);
                 if (state != FPSenderState.Error)
                 {
                     state = FPSenderState.Stopped;
@@ -156,13 +218,12 @@ namespace FoundationPoseStreaming
                     return false;
                 }
 
-                if (pendingRegistrationMessage != null)
+                if (pendingRegistrationFrame != null)
                 {
                     return false;
                 }
 
-                pendingRegistrationMessage = frame.message;
-                pendingRegistrationFrameId = frame.header.frame_id;
+                pendingRegistrationFrame = frame;
                 frameAvailable.Set();
                 return true;
             }
@@ -182,13 +243,12 @@ namespace FoundationPoseStreaming
                     return false;
                 }
 
-                if (latestTrackingMessage != null)
+                if (latestTrackingFrame != null)
                 {
                     Interlocked.Increment(ref droppedTrackingFrameCount);
                 }
 
-                latestTrackingMessage = frame.message;
-                latestTrackingFrameId = frame.header.frame_id;
+                latestTrackingFrame = frame;
                 frameAvailable.Set();
                 return true;
             }
@@ -225,6 +285,8 @@ namespace FoundationPoseStreaming
                                   $"noDelay={client.NoDelay} sendTimeoutMs={client.SendTimeout}");
                         ConnectWithTimeout(client, host, port, connectTimeoutMs);
                         stream = client.GetStream();
+                        StartControlReader(stream);
+                        lastSendUtc = default(DateTime);
                         lastError = null;
 
                         lock (gate)
@@ -262,41 +324,40 @@ namespace FoundationPoseStreaming
 
                 while (!stopRequested)
                 {
-                    byte[] message = null;
-                    string frameId = null;
+                    FPEncodedFrame frame = null;
                     bool registrationFrame = false;
 
                     lock (gate)
                     {
-                        if (pendingRegistrationMessage != null)
+                        if (pendingRegistrationFrame != null)
                         {
                             state = FPSenderState.SendingRegistrationFrame;
-                            message = pendingRegistrationMessage;
-                            frameId = pendingRegistrationFrameId;
-                            pendingRegistrationMessage = null;
-                            pendingRegistrationFrameId = null;
+                            frame = pendingRegistrationFrame;
+                            pendingRegistrationFrame = null;
                             registrationFrame = true;
                         }
-                        else if (state == FPSenderState.TrackingStream && latestTrackingMessage != null)
+                        else if (state == FPSenderState.TrackingStream && latestTrackingFrame != null)
                         {
-                            message = latestTrackingMessage;
-                            frameId = latestTrackingFrameId;
-                            latestTrackingMessage = null;
-                            latestTrackingFrameId = null;
+                            frame = latestTrackingFrame;
+                            latestTrackingFrame = null;
                         }
                     }
 
-                    if (message == null)
+                    if (frame == null)
                     {
                         frameAvailable.WaitOne(20);
                         continue;
                     }
 
                     DateTime start = DateTime.UtcNow;
-                    stream.Write(message, 0, message.Length);
+                    stream.Write(frame.message, 0, frame.message.Length);
                     stream.Flush();
                     Interlocked.Increment(ref sentFrameCount);
+                    RecordSentFrame(frame.header.frame_id, frame.header.index, start);
                     double sendMs = (DateTime.UtcNow - start).TotalMilliseconds;
+                    double frameIntervalMs = lastSendUtc == default(DateTime) ? 0.0 : (start - lastSendUtc).TotalMilliseconds;
+                    double effectiveSendFps = frameIntervalMs > 0.0 ? 1000.0 / frameIntervalMs : 0.0;
+                    lastSendUtc = start;
 
                     if (registrationFrame)
                     {
@@ -307,11 +368,11 @@ namespace FoundationPoseStreaming
                                 state = FPSenderState.TrackingStream;
                             }
                         }
-                        Log($"Sent REGISTER frame {frameId}, bytes={message.Length}, send_ms={sendMs:F2}");
+                        LogSend("REGISTER", frame, sendMs, frameIntervalMs, effectiveSendFps);
                     }
                     else if (verboseLogging)
                     {
-                        Log($"Sent TRACK frame {frameId}, bytes={message.Length}, send_ms={sendMs:F2}, dropped_tracking={DroppedTrackingFrameCount}");
+                        LogSend("TRACK", frame, sendMs, frameIntervalMs, effectiveSendFps);
                     }
                 }
             }
@@ -328,6 +389,217 @@ namespace FoundationPoseStreaming
             {
                 CloseSocket();
             }
+        }
+
+        void StartControlReader(NetworkStream connectedStream)
+        {
+            controlThread = new Thread(() => ControlReadLoop(connectedStream))
+            {
+                IsBackground = true,
+                Name = "FoundationPose TCP Control Reader"
+            };
+            controlThread.Start();
+        }
+
+        void ControlReadLoop(NetworkStream controlStream)
+        {
+            try
+            {
+                byte[] lengthBuffer = new byte[4];
+                while (!stopRequested)
+                {
+                    if (!ReadExact(controlStream, lengthBuffer, 0, lengthBuffer.Length))
+                    {
+                        return;
+                    }
+
+                    uint jsonLength = ReadUInt32BigEndian(lengthBuffer, 0);
+                    if (jsonLength == 0 || jsonLength > 1024 * 1024)
+                    {
+                        Debug.LogWarning($"[FoundationPoseTcpSender] Ignoring invalid control json_len={jsonLength}");
+                        return;
+                    }
+
+                    byte[] jsonBuffer = new byte[jsonLength];
+                    if (!ReadExact(controlStream, jsonBuffer, 0, jsonBuffer.Length))
+                    {
+                        return;
+                    }
+
+                    string json = Encoding.UTF8.GetString(jsonBuffer);
+                    HandleControlMessage(json);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!stopRequested)
+                {
+                    Debug.LogWarning($"[FoundationPoseTcpSender] Control reader stopped: {DescribeException(ex)}");
+                }
+            }
+        }
+
+        void HandleControlMessage(string json)
+        {
+            if (!FPResultJsonParser.TryGetString(json, "magic", out string magic))
+            {
+                Debug.LogWarning($"[FoundationPoseTcpSender] Ignoring JSON without magic json={json}");
+                return;
+            }
+
+            if (magic == "FPRESULT")
+            {
+                HandleTrackingResult(json);
+                return;
+            }
+
+            if (magic != "FPCONTROL")
+            {
+                Debug.LogWarning($"[FoundationPoseTcpSender] Ignoring unknown PC message magic={magic}");
+                return;
+            }
+
+            FPControlMessage control;
+            try
+            {
+                control = JsonUtility.FromJson<FPControlMessage>(json);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[FoundationPoseTcpSender] Failed to parse control json={json}\n{DescribeException(ex)}");
+                return;
+            }
+
+            if (control == null || control.version != 1)
+            {
+                Debug.LogWarning($"[FoundationPoseTcpSender] Ignoring unknown control json={json}");
+                return;
+            }
+
+            if (control.type != "mask_request")
+            {
+                Log($"Ignoring unsupported control type={control.type}");
+                return;
+            }
+
+            int requestedFrames = Math.Min(30, Math.Max(1, control.request_frames <= 0 ? 5 : control.request_frames));
+            lock (gate)
+            {
+                maskBurstFramesRemaining = Math.Max(maskBurstFramesRemaining, requestedFrames);
+                maskBurstReason = string.IsNullOrEmpty(control.reason) ? "mask_request" : control.reason;
+                maskBurstRequestFrameId = control.frame_id;
+            }
+
+            Debug.Log(
+                "[FoundationPoseTcpSender] MASK_BURST_START " +
+                $"request_frames={requestedFrames} reason={maskBurstReason} request_frame_id={maskBurstRequestFrameId ?? "none"}");
+        }
+
+        void HandleTrackingResult(string json)
+        {
+            if (!FPResultJsonParser.TryParseTrackingResult(json, out FPTrackingResult result, out string reason))
+            {
+                Debug.LogWarning($"[FoundationPoseTcpSender] Dropped FPRESULT reason={reason} json={json}");
+                return;
+            }
+
+            result.sequence = Interlocked.Increment(ref trackingResultSequence);
+            result.receivedUtc = DateTime.UtcNow;
+            int currentFrameIndex = LastSentFrameIndex;
+
+            lock (gate)
+            {
+                if (latestTrackingResult != null &&
+                    result.index >= 0 &&
+                    latestTrackingResult.index >= 0 &&
+                    result.index <= latestTrackingResult.index)
+                {
+                    Debug.Log(
+                        "[FoundationPoseTcpSender] FPRESULT_DROPPED_OLD " +
+                        $"frame_id={result.frameId ?? "none"} index={result.index} " +
+                        $"latest_index={latestTrackingResult.index} current_unity_frame_index={currentFrameIndex}");
+                    return;
+                }
+
+                if (!string.IsNullOrEmpty(result.frameId) &&
+                    sentFrameUtcById.TryGetValue(result.frameId, out DateTime sentUtc))
+                {
+                    result.hasLatencyEstimate = true;
+                    result.latencyMs = (result.receivedUtc - sentUtc).TotalMilliseconds;
+                }
+
+                latestTrackingResult = result;
+            }
+
+            Debug.Log(
+                "[FoundationPoseTcpSender] FPRESULT_RECEIVED " +
+                $"frame_id={result.frameId ?? "none"} index={result.index} timestamp={(result.hasTimestamp ? result.timestamp.ToString("F6") : "unknown")} " +
+                $"current_unity_frame_index={currentFrameIndex} " +
+                $"latency_ms={(result.hasLatencyEstimate ? result.latencyMs.ToString("F2") : "unknown")} " +
+                $"pc_queue_latency_ms={(result.hasPcQueueLatencyMs ? result.pcQueueLatencyMs.ToString("F2") : "unknown")} " +
+                $"smoothing_alpha={(result.hasSmoothingAlpha ? result.smoothingAlpha.ToString("F3") : "unknown")} " +
+                $"bbox_lines={result.bboxLines.Length} axis_lines={result.axisLines.Length} drawn=pending");
+        }
+
+        void RecordSentFrame(string frameId, int frameIndex, DateTime sentUtc)
+        {
+            Volatile.Write(ref lastSentFrameIndex, frameIndex);
+            if (string.IsNullOrEmpty(frameId))
+            {
+                return;
+            }
+
+            lock (gate)
+            {
+                sentFrameUtcById[frameId] = sentUtc;
+                sentFrameIdOrder.Enqueue(frameId);
+                while (sentFrameIdOrder.Count > 120)
+                {
+                    string oldFrameId = sentFrameIdOrder.Dequeue();
+                    sentFrameUtcById.Remove(oldFrameId);
+                }
+            }
+        }
+
+        static bool ReadExact(NetworkStream input, byte[] buffer, int offset, int count)
+        {
+            int totalRead = 0;
+            while (totalRead < count)
+            {
+                int read = input.Read(buffer, offset + totalRead, count - totalRead);
+                if (read <= 0)
+                {
+                    return false;
+                }
+
+                totalRead += read;
+            }
+
+            return true;
+        }
+
+        static uint ReadUInt32BigEndian(byte[] buffer, int offset)
+        {
+            return ((uint)buffer[offset] << 24) |
+                   ((uint)buffer[offset + 1] << 16) |
+                   ((uint)buffer[offset + 2] << 8) |
+                   buffer[offset + 3];
+        }
+
+        void LogSend(string operation, FPEncodedFrame frame, double sendMs, double frameIntervalMs, double effectiveSendFps)
+        {
+            FPFrameHeader header = frame.header;
+            Log(
+                $"Sent {operation} frame {header.frame_id} index={header.index} bytes={frame.message.Length} " +
+                $"rgb_size={header.width}x{header.height} depth_size={header.width}x{header.height} " +
+                $"rgb_format={header.rgb_format} rgb_len={header.rgb_len} depth_len={header.depth_len} " +
+                $"mask_format={header.mask_format} mask_len={header.mask_len} mask_pixels={frame.maskPixelCount} " +
+                $"mask_source={frame.maskSourceKind ?? "unknown"} mask_requested={frame.maskRequested} " +
+                $"mask_burst_remaining={frame.maskBurstRemaining} mask_reason={frame.maskReason ?? "ok"} " +
+                $"encode_rgb_ms={frame.encodeRgbMs:F2} encode_depth_ms={frame.encodeDepthMs:F2} " +
+                $"encode_mask_ms={frame.encodeMaskMs:F2} send_ms={sendMs:F2} " +
+                $"frame_interval_ms={frameIntervalMs:F2} effective_send_fps={effectiveSendFps:F2} " +
+                $"dropped_tracking={DroppedTrackingFrameCount}");
         }
 
         void CloseSocket()

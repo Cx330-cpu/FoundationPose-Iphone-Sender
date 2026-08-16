@@ -4,7 +4,10 @@
 EditorBuildSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 2
-  m_Scenes: []
+  m_Scenes:
+  - enabled: 1
+    path: Assets/FoundationPoseTest.unity
+    guid: e7d4e28b1e8dd491a992ac34597d4311
   m_configObjects:
     UnityEditor.XR.ARKit.ARKitSettings: {fileID: 11400000, guid: 00060cd83de4e439c8fe217233ebebbe, type: 2}
     com.unity.xr.arfoundation.simulation_settings: {fileID: 11400000, guid: 3b19a0441990f48999ca8ff1c4ddb7e6, type: 2}

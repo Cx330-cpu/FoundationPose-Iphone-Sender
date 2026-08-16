@@ -149,8 +149,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: e0cb9aa70a22847b5925ee5f067c10a9, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
+  m_Name:
+  m_EditorClassIdentifier:
   m_Camera: {fileID: 918190329}
   m_OriginBaseGameObject: {fileID: 179405743}
   m_CameraFloorOffsetObject: {fileID: 1583542577}
@@ -200,8 +200,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fa850fbd5b8aded44846f96e35f1a9f5, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
+  m_Name:
+  m_EditorClassIdentifier:
 --- !u!114 &467732989
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -550,9 +550,9 @@ MonoBehaviour:
   maskSource: {fileID: 1205372722}
   maxRgbDepthDeltaMs: 50
   maxAspectRatioDelta: 0.01
-  targetFps: 5
-  rgbCodec: 0
-  jpegQuality: 95
+  targetFps: 30
+  rgbCodec: 1
+  jpegQuality: 85
   verboseLogging: 1
 --- !u!114 &960834614
 MonoBehaviour:
@@ -570,8 +570,8 @@ MonoBehaviour:
   width: 256
   height: 192
   fps: 2
-  rgbCodec: 0
-  jpegQuality: 95
+  rgbCodec: 1
+  jpegQuality: 85
 --- !u!1 &1205372721
 GameObject:
   m_ObjectHideFlags: 0
@@ -584,6 +584,8 @@ GameObject:
   - component: {fileID: 1205372722}
   - component: {fileID: 1205372724}
   - component: {fileID: 1205372728}
+  - component: {fileID: 1205372729}
+  - component: {fileID: 1205372730}
   m_Layer: 0
   m_Name: FoundationPose Mask
   m_TagString: Untagged
@@ -667,6 +669,67 @@ MonoBehaviour:
   verboseLogging: 1
   enableGeometryTrace: 1
   geometryTraceIntervalSeconds: 0.5
+--- !u!114 &1205372729
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1205372721}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 35cc7aa9fb4e44db9df983945462d87d, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  cameraManager: {fileID: 918190327}
+  occlusionManager: {fileID: 918190324}
+  maskSource: {fileID: 1205372722}
+  objectAnchor: {fileID: 0}
+  sessionName: glass_cup_ref_views
+  objectId: 1
+  clearExistingObjectDirectory: 0
+  useDepthResolution: 1
+  fallbackOutputWidth: 256
+  fallbackOutputHeight: 192
+  recordOnEnable: 0
+  captureCountTarget: 24
+  minCaptureIntervalSeconds: 0.4
+  minCameraTranslationMeters: 0.03
+  minCameraRotationDegrees: 8
+  maxRgbDepthDeltaMs: 80
+  maxAspectRatioDelta: 0.01
+  drawControls: 1
+  controlWidth: 560
+  controlHeight: 100
+  controlSpacing: 18
+  controlBottomMargin: 32
+  controlFontSize: 34
+  verboseLogging: 1
+--- !u!114 &1205372730
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1205372721}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c916e68f6fd74c8c9c2fc5e72f4c21fb, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  tcpSender: {fileID: 960834611}
+  fitMode: 0
+  coordinateRotation: 1
+  horizontalMirror: 0
+  maxResultAgeSeconds: 0.15
+  maxEstimatedLatencyMs: 150
+  maxFrameLag: 5
+  drawOverlay: 1
+  bboxThickness: 3
+  axisThickness: 5
+  statusFontSize: 36
+  drawStatus: 1
+  verboseLogging: 1
 --- !u!1 &1583542577
 GameObject:
   m_ObjectHideFlags: 0

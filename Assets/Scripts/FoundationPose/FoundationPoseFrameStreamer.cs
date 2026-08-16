@@ -21,10 +21,10 @@ namespace FoundationPoseStreaming
         public double maxRgbDepthDeltaMs = 50.0;
         [Tooltip("Maximum absolute RGB/depth aspect-ratio difference allowed before dropping a frame.")]
         public double maxAspectRatioDelta = 0.01;
-        public float targetFps = 5.0f;
-        public FPRgbCodec rgbCodec = FPRgbCodec.Png;
+        public float targetFps = 30.0f;
+        public FPRgbCodec rgbCodec = FPRgbCodec.Jpeg;
         [Range(1, 100)]
-        public int jpegQuality = 95;
+        public int jpegQuality = 85;
         public bool verboseLogging = true;
 
         readonly object encoderGate = new object();
@@ -40,6 +40,11 @@ namespace FoundationPoseStreaming
         int nextIndex;
         long droppedCaptureCount;
         long droppedTrackingEncodeCount;
+        byte[] lastValidMaskU8;
+        RectInt lastValidMaskBBox;
+        double lastValidMaskTimestamp;
+        int lastValidMaskWidth;
+        int lastValidMaskHeight;
 
         sealed class RawFrameSample
         {
@@ -56,6 +61,11 @@ namespace FoundationPoseStreaming
             public int invalidDepthCount;
             public RectInt maskBBox;
             public double maskTimestamp;
+            public int maskPixelCount;
+            public string maskSourceKind;
+            public string maskReason;
+            public bool maskRequested;
+            public int maskBurstRemaining;
         }
 
         void Reset()
@@ -226,28 +236,27 @@ namespace FoundationPoseStreaming
 
             FPCameraIntrinsics scaledIntrinsics = ScaleIntrinsics(intrinsics, finalWidth, finalHeight);
             bool isRegistration = tcpSender.NeedsRegistrationFrame;
-
-            byte[] mask = null;
-            RectInt maskBBox = default;
-            double maskTimestamp = 0.0;
-            if (isRegistration)
+            bool maskRequested = false;
+            int maskBurstRemaining = 0;
+            string maskRequestReason = null;
+            string maskRequestFrameId = null;
+            if (!isRegistration)
             {
-                if (maskSource == null)
-                {
-                    LogDrop("registration_requires_mask_source");
-                    return null;
-                }
-
-                if (!maskSource.TryBuildMask(finalWidth, finalHeight, rgbTimestamp, out mask, out maskBBox, out maskTimestamp, out string maskReason))
-                {
-                    LogDrop($"registration_mask_unavailable {maskReason}");
-                    return null;
-                }
-
-                Log($"Using registration mask bbox={maskBBox}, mask_ts={maskTimestamp:F6}, rgb_ts={rgbTimestamp:F6}");
+                maskRequested = tcpSender.TryConsumeMaskBurstFrame(out maskBurstRemaining, out maskRequestReason, out maskRequestFrameId);
             }
 
-            Log($"captured register={isRegistration} rgb_ts={rgbTimestamp:F6} depth_ts={depthTimestamp:F6} delta_ms={deltaMs:F2} final={finalWidth}x{finalHeight} K=[{scaledIntrinsics.fx:F3},{scaledIntrinsics.fy:F3},{scaledIntrinsics.cx:F3},{scaledIntrinsics.cy:F3}] invalid_depth={invalidDepthCount}");
+            byte[] mask;
+            RectInt maskBBox;
+            double maskTimestamp;
+            int maskPixelCount;
+            string maskSourceKind;
+            string maskReason;
+            if (!TryBuildFrameMask(finalWidth, finalHeight, rgbTimestamp, isRegistration, maskRequested, maskRequestReason, out mask, out maskBBox, out maskTimestamp, out maskPixelCount, out maskSourceKind, out maskReason))
+            {
+                return null;
+            }
+
+            Log($"captured register={isRegistration} rgb_ts={rgbTimestamp:F6} depth_ts={depthTimestamp:F6} delta_ms={deltaMs:F2} final={finalWidth}x{finalHeight} K=[{scaledIntrinsics.fx:F3},{scaledIntrinsics.fy:F3},{scaledIntrinsics.cx:F3},{scaledIntrinsics.cy:F3}] invalid_depth={invalidDepthCount} mask_requested={maskRequested} mask_burst_remaining={maskBurstRemaining} mask_request_frame_id={maskRequestFrameId ?? "none"} mask_source={maskSourceKind} mask_pixels={maskPixelCount} mask_reason={maskReason ?? "ok"}");
 
             return new RawFrameSample
             {
@@ -263,8 +272,76 @@ namespace FoundationPoseStreaming
                 deltaMs = deltaMs,
                 invalidDepthCount = invalidDepthCount,
                 maskBBox = maskBBox,
-                maskTimestamp = maskTimestamp
+                maskTimestamp = maskTimestamp,
+                maskPixelCount = maskPixelCount,
+                maskSourceKind = maskSourceKind,
+                maskReason = maskReason,
+                maskRequested = maskRequested,
+                maskBurstRemaining = maskBurstRemaining
             };
+        }
+
+        bool TryBuildFrameMask(
+            int width,
+            int height,
+            double rgbTimestamp,
+            bool isRegistration,
+            bool maskRequested,
+            string maskRequestReason,
+            out byte[] mask,
+            out RectInt maskBBox,
+            out double maskTimestamp,
+            out int maskPixelCount,
+            out string maskSourceKind,
+            out string maskReason)
+        {
+            mask = null;
+            maskBBox = default;
+            maskTimestamp = 0.0;
+            maskPixelCount = 0;
+            maskSourceKind = "missing";
+            maskReason = null;
+
+            if (!isRegistration && !maskRequested)
+            {
+                maskSourceKind = "none";
+                return true;
+            }
+
+            if (maskSource != null &&
+                maskSource.TryBuildMask(width, height, rgbTimestamp, out mask, out maskBBox, out maskTimestamp, out maskReason))
+            {
+                maskPixelCount = CountMaskPixels(mask);
+                maskSourceKind = maskRequested ? "requested_bbox_mask" : "bbox_mask";
+                RememberLastValidMask(mask, width, height, maskBBox, maskTimestamp);
+                Log($"Using {maskSourceKind} bbox={maskBBox}, mask_ts={maskTimestamp:F6}, rgb_ts={rgbTimestamp:F6}, mask_pixels={maskPixelCount}");
+                return true;
+            }
+
+            string unavailableReason = maskSource == null ? "no_mask_source" : maskReason;
+            if (isRegistration)
+            {
+                LogDrop($"registration_mask_unavailable {unavailableReason}");
+                return false;
+            }
+
+            if (TryGetReusableMask(width, height, out mask, out maskBBox, out maskTimestamp))
+            {
+                maskPixelCount = CountMaskPixels(mask);
+                maskSourceKind = maskRequested ? "requested_reused_mask" : "reused_bbox_mask";
+                maskReason = string.IsNullOrEmpty(maskRequestReason) ? unavailableReason : $"{maskRequestReason}; {unavailableReason}";
+                Debug.LogWarning(
+                    "[FoundationPoseFrameStreamer] Reused previous tracking mask " +
+                    $"reason={maskReason} final={width}x{height} bbox={maskBBox} " +
+                    $"mask_pixels={maskPixelCount} mask_age_ms={Math.Abs(rgbTimestamp - maskTimestamp) * 1000.0:F2}");
+                return true;
+            }
+
+            maskReason = string.IsNullOrEmpty(maskRequestReason) ? unavailableReason : $"{maskRequestReason}; {unavailableReason}";
+            Debug.LogWarning(
+                "[FoundationPoseFrameStreamer] MASK_MISSING " +
+                $"reason={maskReason} final={width}x{height} rgb_ts={rgbTimestamp:F6}");
+            return true;
         }
 
         bool ShouldCaptureNow()
@@ -434,6 +511,50 @@ namespace FoundationPoseStreaming
                 intrinsics.principalPoint.y * scaleY);
         }
 
+        void RememberLastValidMask(byte[] mask, int width, int height, RectInt maskBBox, double maskTimestamp)
+        {
+            lastValidMaskU8 = mask;
+            lastValidMaskWidth = width;
+            lastValidMaskHeight = height;
+            lastValidMaskBBox = maskBBox;
+            lastValidMaskTimestamp = maskTimestamp;
+        }
+
+        bool TryGetReusableMask(int width, int height, out byte[] mask, out RectInt maskBBox, out double maskTimestamp)
+        {
+            if (lastValidMaskU8 == null || lastValidMaskWidth != width || lastValidMaskHeight != height)
+            {
+                mask = null;
+                maskBBox = default;
+                maskTimestamp = 0.0;
+                return false;
+            }
+
+            mask = lastValidMaskU8;
+            maskBBox = lastValidMaskBBox;
+            maskTimestamp = lastValidMaskTimestamp;
+            return true;
+        }
+
+        static int CountMaskPixels(byte[] mask)
+        {
+            if (mask == null)
+            {
+                return 0;
+            }
+
+            int count = 0;
+            for (int i = 0; i < mask.Length; ++i)
+            {
+                if (mask[i] != 0)
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
         void EnqueueRegistrationSample(RawFrameSample sample)
         {
             lock (encoderGate)
@@ -505,6 +626,11 @@ namespace FoundationPoseStreaming
                         sample.rgbTimestamp,
                         rgbCodec,
                         jpegQuality);
+                    encoded.maskPixelCount = sample.maskPixelCount;
+                    encoded.maskSourceKind = sample.maskSourceKind;
+                    encoded.maskReason = sample.maskReason;
+                    encoded.maskRequested = sample.maskRequested;
+                    encoded.maskBurstRemaining = sample.maskBurstRemaining;
 
                     bool accepted = sample.isRegistration
                         ? tcpSender.EnqueueRegistrationFrame(encoded)
@@ -524,7 +650,17 @@ namespace FoundationPoseStreaming
                                 $"mask_age_ms={Math.Abs(sample.rgbTimestamp - sample.maskTimestamp) * 1000.0:F2}");
                         }
                         nextIndex++;
-                        Log($"encoded frame_id={frameId} index={frameIndex} register={sample.isRegistration} encode_ms={encodeMs:F2} message_bytes={encoded.message.Length} dropped_tracking_encode={droppedTrackingEncodeCount}");
+                        Log(
+                            $"encoded frame_id={frameId} index={frameIndex} register={sample.isRegistration} " +
+                            $"rgb_size={sample.width}x{sample.height} depth_size={sample.width}x{sample.height} " +
+                            $"mask_size={(sample.maskU8 == null ? "none" : sample.width + "x" + sample.height)} " +
+                            $"mask_pixels={sample.maskPixelCount} mask_len={encoded.header.mask_len} " +
+                            $"mask_format={encoded.header.mask_format} mask_source={sample.maskSourceKind} " +
+                            $"mask_requested={sample.maskRequested} mask_burst_remaining={sample.maskBurstRemaining} " +
+                            $"mask_reason={sample.maskReason ?? "ok"} encode_rgb_ms={encoded.encodeRgbMs:F2} " +
+                            $"encode_depth_ms={encoded.encodeDepthMs:F2} encode_mask_ms={encoded.encodeMaskMs:F2} " +
+                            $"encode_ms={encodeMs:F2} " +
+                            $"message_bytes={encoded.message.Length} dropped_tracking_encode={droppedTrackingEncodeCount}");
                     }
                     else
                     {

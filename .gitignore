@@ -105,4 +105,26 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# macOS Finder metadata
 .DS_Store
+**/.DS_Store
+
+# Local YOLO / debug test outputs
+/TestOutputs/
+/runs/
+/debug*/
+/debug_*/
+
+# BundleSDF recorder exports copied into the project by hand.
+# Runtime recorder output is normally under Application.persistentDataPath,
+# but keep project-local exports out of git too.
+/BundleSDFRefViews/
+/ref_views/
+/*_ref_views/
+
+# Xcode local state and build caches
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
